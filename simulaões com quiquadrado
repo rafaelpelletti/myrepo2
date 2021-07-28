@@ -1,0 +1,957 @@
+# simulações de toerias de montagem de comunidades
+# usando pacote de simulacoes MCSim
+# usando diferentes combinacoes de parametros pra cada teoria e selecionando o melhor conjunto de paramteros com quiquadrado modificado
+
+#pacotes usados
+# devtools::install_github('sokole/MCSim@v0.4.9')
+library(MCSim)
+library(raster)
+library(untb)
+
+#experimentos pre simulacao
+nb<- c(10, 20, 30)
+nu<- c(0.1, 0.6, 0.9)
+ld<- c(10, 100, 1000)
+
+par<- expand.grid(nb, nu, ld)
+
+#funcao para calcular riquezas 
+vegetarian::d(abundances = x, lev = "beta", q = 1)
+
+
+#hubbelandia 
+
+nu<- c(10^-6,10^-5,10^-4,10^-3,10^-2,10^-1)
+dk<- c(10^6,10^5,10^4,10^3,10^2,10^1)
+
+#definindo diretorio
+setwd("/home/aluno/Downloads/R mestrado")
+
+load("sim_quiquadrado.RData")
+
+
+# carregando dados
+
+#arvores (dap acima de 10 cm) da parcela de barro colorado (censo mais recente))
+#fonte: https://repository.si.edu/handle/10088/20925
+load("bci.tree8.rdata")
+
+
+#arvores (dap acima de 10 cm) de parcelas espalhadas pelo panama (censo mais recente de cada)
+#fonte: https://repository.si.edu/handle/10088/28866
+load("marenaRecent.full1.rdata")
+
+#informacoes sobre as parcelas do estudo
+#fonte: https://stridata-si.opendata.arcgis.com/datasets/8204be4997a54ff2b621f49901b21d4c_0?geometry=-84.456%2C7.523%2C-77.046%2C9.425
+plots_panama<-read.csv("CTFS_Plots_in_Panama.csv")
+
+# Preparando os dados
+
+# formar de uma matriz de especies por sitio
+
+#selecionando apenas as arvores vivas dos arquivos
+bci<- subset(bci.tree8, status %in% "A")
+panama<- subset(marenaRecent.full1, status %in% "A")
+
+str(bci)
+#tabela de especies por sitio
+panama_abb<- table(panama$sp, panama$plot)
+bci_abb<- table(bci$sp, bci$quadrat)
+
+# obs: nos dados marenaRecent tem informacao de apenas 4ha de BCI
+# retirei essas informacoes para acrescentar bci completo (50ha) depois
+panama_abb<- panama_abb[,-2]
+
+#organizando a matriz por proximidade a BCI e selecionando apenas as parcelas que possuem informacoes das parcelas (altitude, localização)
+plots_prox_bci<- c("p10", "p14", "p11", "p18","p12", "lp2", "p13", "lp1","p25", "p19", "p20", "p26", "p05", "p08", "p15", "p06", "p07", "p09", "p17","p16", "p04", "p03", "p21", "p22", "sherman", "p24", "p23", "p02", "elcharco", "p01", "p27", "p28", "plot31", "plot32", "caritas", "campochagres", "p30", "p29", "cocoli", "p33", "cerrogalera", "metrop", "cerrolatorre", "p36", "p34", "p35", "p40", "p41", "p39", "coba2", "coba1", "p38", "p37", "ina" , "achotines", "gavilan")
+panama_abb<- subset.data.frame(panama_abb, select=plots_prox_bci)
+panama_abb<- as.data.frame.matrix(panama_abb)
+
+#acrescentando BCI na primeira coluna da tabela
+bci_50ha<- data.frame(rowSums(bci_abb))
+panama_abb_com<- merge.data.frame(bci_50ha, panama_abb, by.x="row.names", by.y="row.names", all.x=TRUE, all.y=TRUE) 
+str(panama_abb_com)
+head(panama_abb_com)
+# como resultado do merge os nomes das especies vira uma coluna
+# entao precisa mudar no data frame para os nomes serem rownames
+panama_abb_com<- data.frame(panama_abb_com[,-1], row.names=panama_abb_com[,1])
+#como resultado do merge algumas especies ficam NA pois nao estavam em uma das tabelas
+# transformamos esses NA's em 0
+panama_abb_com[is.na(panama_abb_com)]<- 0
+colnames(panama_abb_com)[1] <- "bci"
+
+#tabela de especies por sitio
+head(panama_abb_com)
+panama_abb_com[is.na(panama_abb_com)]<- 0
+
+#dados das parcelas:
+
+dados_parcelas<- plots_panama[plots_panama$PlotSize>0,]
+str(dados_parcelas)
+#algumas parcelas não possuem informações, o jeito facil de tira-las eh so retirar as que nao tem informacao de tamanho
+
+#para que de pra combinar os dados, os dados da parcela tbm precisam estar em ordem de proximidade a bci
+pts<- data.frame(dados_parcelas$UTM_X, dados_parcelas$UTM_Y, row.names=dados_parcelas$Name)
+dist<- pointDistance(pts, lonlat=FALSE)
+rownames(dist)<- rownames(pts)
+colnames(dist)<- rownames(pts)
+str(dist)
+
+#selecionar as dist?ncia apenas de BCI para os outras parcelas
+dist[57,]
+dist_bci<- sort(dist[57,1:57])
+
+# juntando informacao da distancia com outras informacoes da parcela
+distancia<- data.frame(dist_bci)
+dados_parcelas<- merge(dados_parcelas, distancia, by.y="row.names", by.x="Name")
+
+#ordenando as parcelas pela distancia de bci
+dados_parcelas<- dados_parcelas[order(dados_parcelas$dist_bci),]
+
+#colocando o mesmo nome entre as parcelas da matriz de spp por sitio e dados parcelas
+colnames(panama_abb_com)<- dados_parcelas$Name
+
+#criacao das parcelas pra simulacao
+
+xy.coordinates <- data.frame(
+  x = dados_parcelas$UTM_X,
+  y = dados_parcelas$UTM_Y)
+
+#gradiente ambiental
+EfElev<- dados_parcelas$Elevation
+
+#m de dispersao
+parametros_dispersao<- optimal.params.gst(panama_abb_com)
+m_local<- parametros_dispersao$m
+
+simulation_landscape <- MCSim::fn.make.landscape(
+  site.coords = xy.coordinates,
+  Ef = EfElev,
+  m = m_local,
+  JL = colSums(panama_abb_com), 
+  area.m2=dados_parcelas$PlotSize,
+  site.ID = dados_parcelas$Name)
+
+print(simulation_landscape$site.info)
+
+#parametros fixos para a simulacao
+
+d.comm<- t(panama_abb_com)
+d.comm.ra <- d.comm / rowSums(d.comm)
+
+sad_regional<- rowSums(panama_abb_com)
+regional.rel.abund<- sad_regional/sum(sad_regional)
+
+niche_pos = niche_pos = runif(ncol(d.comm), min=min(EfElev),max=max(EfElev))
+niche_sd_tn = rep(diff(range(EfElev))*1000, ncol(d.comm))
+
+#parametros para variar
+disp_lim<- c(10, 10^2, 10^3, 10^4, 10^5, 10^6)
+nu<- c(10^-1, 10^-2, 10^-3, 10^-4, 10^-5, 10^-6)
+
+par_sim<- expand.grid(disp_lim,nu)
+ 
+#simulação
+
+for (i in 1:nrow(par_sim)){
+
+sim.neutra <- MCSim::fn.metaSIM(
+  landscape = simulation_landscape,
+  trait.Ef = niche_pos,
+  trait.Ef.sd = niche_sd_tn, 
+  gamma.abund = regional.rel.abund,
+  W.r = par_sim[i,1],
+  nu = par_sim[i,2],
+  n.timestep = 100, 
+  sim.ID = "sim_tn",
+  output.dir.path = "my_sim_output_directory" 
+)
+
+alpha_sim<- rep(NA, 100)
+beta_sim<- rep(NA, 100)
+gamma_sim<- rep(NA, 100)
+
+for (g in 1:100){
+result<- sim.neutra$J.long
+resultTime<- result[result$timestep==g,]
+d.comm_sim<- xtabs(count~site+spp, data=resultTime)
+
+alpha_sim[g]<- vegetarian::d(abundances = d.comm_sim, lev = "alpha", q = 1)
+beta_sim[g]<- vegetarian::d(abundances = d.comm_sim, lev = "beta", q = 1)
+gamma_sim[g]<- vegetarian::d(abundances = d.comm_sim, lev = "gamma", q = 1)
+}
+
+par_sim$qqalpha[i]<- ((alpha_sim[100]-(vegetarian::d(abundances = d.comm, lev = "alpha", q = 1)))^2)/sd(alpha_sim)
+par_sim$qqbeta[i]<- ((beta_sim[100]-(vegetarian::d(abundances = d.comm, lev = "beta", q = 1)))^2)/sd(beta_sim)
+par_sim$qqgamma[i]<- ((gamma_sim[100]-(vegetarian::d(abundances = d.comm, lev = "gamma", q = 1)))^2)/sd(gamma_sim)
+par_sim$qqtotal[i]<- sum(par_sim$qqalpha[i], par_sim$qqbeta[i], par_sim$qqgamma[i])
+}
+
+
+which.min(par_sim$qqtotal)
+
+
+#magurranlandia
+
+#parametros para variar
+disp_lim<- c(10, 10^2, 10^3, 10^4, 10^5, 10^6)
+nu<- c(10^-1, 10^-2, 10^-3, 10^-4, 10^-5, 10^-6)
+niche_sd<- c(sd(EfElev), sd(EfElev)/2, sd(EfElev)/4, sd(EfElev)/8, sd(EfElev)/16, sd(EfElev)/32)
+
+par_sim_mag<- expand.grid(disp_lim,nu,niche_sd)
+
+niche_sd_mag = rep(par_sim_mag[1,3], ncol(d.comm))
+
+
+for (i in 1:36){
+
+niche_sd_mag = rep(par_sim_mag[i,3], ncol(d.comm))
+
+sim.mag <- MCSim::fn.metaSIM(
+  landscape = simulation_landscape,
+  trait.Ef = niche_pos,
+  trait.Ef.sd = niche_sd_mag, 
+  gamma.abund = regional.rel.abund,
+  W.r = par_sim_mag[i,1],
+  nu = par_sim_mag[i,2],
+  n.timestep = 100, 
+  sim.ID = "sim_tn",
+  output.dir.path = "my_sim_output_directory" 
+)
+
+alpha_sim_mag<- rep(NA, 100)
+beta_sim_mag<- rep(NA, 100)
+gamma_sim_mag<- rep(NA, 100)
+
+for (g in 1:100){
+result<- sim.mag$J.long
+resultTime<- result[result$timestep==g,]
+d.comm_sim<- xtabs(count~site+spp, data=resultTime)
+
+alpha_sim_mag[g]<- vegetarian::d(abundances = d.comm_sim, lev = "alpha", q = 1)
+beta_sim_mag[g]<- vegetarian::d(abundances = d.comm_sim, lev = "beta", q = 1)
+gamma_sim_mag[g]<- vegetarian::d(abundances = d.comm_sim, lev = "gamma", q = 1)
+}
+
+par_sim_mag$qqalpha[i]<- ((alpha_sim_mag[100]-(vegetarian::d(abundances = d.comm, lev = "alpha", q = 1)))^2)/sd(alpha_sim_mag)
+par_sim_mag$qqbeta[i]<- ((beta_sim_mag[100]-(vegetarian::d(abundances = d.comm, lev = "beta", q = 1)))^2)/sd(beta_sim_mag)
+par_sim_mag$qqgamma[i]<- ((gamma_sim_mag[100]-(vegetarian::d(abundances = d.comm, lev = "gamma", q = 1)))^2)/sd(gamma_sim_mag)
+par_sim_mag$qqtotal[i]<- sum(par_sim_mag$qqalpha[i], par_sim_mag$qqbeta[i], par_sim_mag$qqgamma[i])
+}
+
+
+which.min(par_sim_mag$qqtotal)
+
+#melhor simulação hubbell
+
+which.min(par_sim$qqtotal)
+par_sim[which.min(par_sim$qqtotal),]
+
+sim.neutra <- MCSim::fn.metaSIM(
+  landscape = simulation_landscape,
+  trait.Ef = niche_pos,
+  trait.Ef.sd = niche_sd_tn, 
+  gamma.abund = regional.rel.abund,
+  W.r = par_sim[10,1],
+  nu = par_sim[10,2],
+  n.timestep = 100, 
+  sim.ID = "sim_tn",
+  output.dir.path = "my_sim_output_directory" 
+)
+
+result<- sim.neutra$J.long
+resultTime<- result[result$timestep==g,]
+d.comm_sim_hub<- xtabs(count~spp+site, data=resultTime)
+
+colnames(d.comm_sim_hub)<- simulation_landscape$site.info$site.ID
+
+#classificacao com bci como primeira parcela e acrescentando as mais proximas
+#obs nao sei como fazer a multinomial com media
+#primeiro pela matriz de dados de entrada
+#segundo pq nao sei como contabilizaria het amb e dist med
+
+#as distancias de bci ja estao no objeto dados_parcelas
+
+#classificacao e graficos simulados
+
+#primeira coisa para classificar: remover as linhas que sao zero
+zero<- which(rowSums(d.comm_sim_hub)==0)
+d_comm_hub<- d.comm_sim_hub[-zero,]
+
+#função para remover linhas com zero
+remove.zero.rows <- function(mx) {
+  row.is.non.zero <- !(rowSums(mx) == 0)
+  structure(mx[row.is.non.zero, , drop = FALSE], meta=attr(mx,"meta"))
+}
+
+tab_classificacao<- d_comm_hub
+for(a in 2:ncol(d_comm_hub)){
+tab<- d_comm_hub[,1:a]
+tab<- remove.zero.rows(tab)
+abundantes<- apply(tab, 2, FUN= function(x){ 
+z<- x/sum(x)
+y<- cumsum(sort(z[z>0], decreasing=TRUE))
+ab<- which(y<0.75)
+names(ab)
+})
+
+nomes_abundantes<- unlist(abundantes)
+especies_abb<- unique(as.vector(as.matrix(nomes_abundantes)))
+
+tod<- rownames(d_comm_hub)
+part<- rownames(tab)
+presenca<- which(tod %in% part) 
+tab_classificacao[-presenca,a]<- "A"
+tab_classificacao[presenca,a]<- "E"
+abundantes<- which(tod %in% especies_abb)
+tab_classificacao[abundantes,a]<- "AL"
+}
+
+x<- d_comm_hub[,1]
+x<- x[x>0]
+z<- x/sum(x)
+y<- cumsum(sort(z[z>0], decreasing=TRUE))
+ab<- which(y<0.75)
+abundantes<- names(ab)
+tod<- rownames(d_comm_hub)
+part<- names(x)
+presentes<- which(tod %in% part)
+tab_classificacao[-presentes,1]<- "A"
+tab_classificacao[presentes,1]<- "E"
+abundantes<- which(tod %in% abundantes)
+tab_classificacao[abundantes,1]<- "AL"
+
+#dados mudanca de proporcao de cada categoria por escala
+
+p_categoria <- data.frame(AL=rep(NA, ncol(d_comm_hub)), E=rep(NA, ncol(d_comm_hub)), A=rep(NA, ncol(d_comm_hub)))
+
+for (b in 1:ncol(d_comm_hub)){
+p_categoria[b,]<-proportions(table(tab_classificacao[,b]))[c("AL", "E", "A")] 
+}
+
+p_categoria[is.na(p_categoria)]<- 0
+
+p_categoria<- cbind(p_categoria, nindv=cumsum(simulation_landscape$site.info$JL))
+
+#variaveis preditoras
+het_amb<- rep(NA, ncol(d_comm_hub))
+for(i in 1:ncol(d_comm_hub)){
+het_amb[i]<- var(simulation_landscape$site.info$Ef[1:i])
+}
+
+dist_med<- rep(NA, ncol(d_comm_hub))
+for(i in 1:ncol(d_comm_hub)){
+dist_med[i]<- median(dados_parcelas$dist_bci[1:i])
+}
+
+p_categoria<- cbind(p_categoria, het_amb=het_amb, dist_med=dist_med)
+p_categoria[is.na(p_categoria)]<- 0
+
+#graficos
+
+x<- p_categoria[,"nindv"]
+
+X11(width = 10, height = 5)
+layout(matrix(c(1:3), nrow=1, ncol=3))
+layout.show(3)
+
+par(las=1, bty="l", mar=c(4, 4, 4, 1))
+
+plot(x,p_categoria[,"AL"], type="l", lty="solid", 
+ylab="porcentagem da metacomunidade", 
+xlab="nindv")
+
+mtext("Abundante local", side=3, line=-1)
+
+plot(x,p_categoria[,"E"], type="l", lty="solid", 
+xlab="nindv", ylab="",
+main="Magurranlandia %mtc por categoria por nindv")
+
+mtext("Esparsa", side=3, line=-1)
+
+plot(x,p_categoria[,"A"], type="l", lty="solid",  
+xlab="nindv", ylab="")
+
+mtext("Ausente", side=3, line=-1)
+
+x<- p_categoria[,"dist_med"]
+
+X11(width = 10, height = 5)
+layout(matrix(c(1:3), nrow=1, ncol=3))
+layout.show(3)
+
+par(las=1, bty="l", mar=c(4, 4, 4, 1))
+
+plot(x,p_categoria[,"AL"], type="l", lty="solid", 
+ylab="porcentagem da metacomunidade", 
+xlab="dist_med")
+
+mtext("Abundante local", side=3, line=-1)
+
+plot(x,p_categoria[,"E"], type="l", lty="solid", 
+xlab="dist_med", ylab="",
+main="Magurranlandia %mtc por categoria por dist_med")
+
+mtext("Esparsa", side=3, line=-1)
+
+plot(x,p_categoria[,"A"], type="l", lty="solid",  
+xlab="dist_med", ylab="")
+
+mtext("Ausente", side=3, line=-1)
+
+x<- p_categoria[,"het_amb"]
+
+X11(width = 10, height = 5)
+layout(matrix(c(1:3), nrow=1, ncol=3))
+layout.show(3)
+
+par(las=1, bty="l", mar=c(4, 4, 4, 1))
+
+plot(x,p_categoria[,"AL"], type="l", lty="solid", 
+ylab="porcentagem da metacomunidade", 
+xlab="het_amb")
+
+mtext("Abundante local", side=3, line=-1)
+
+plot(x,p_categoria[,"E"], type="l", lty="solid", 
+xlab="het_amb", ylab="",
+main="Magurranlandia %mtc por categoria por het_amb")
+
+mtext("Esparsa", side=3, line=-1)
+
+plot(x,p_categoria[,"A"], type="l", lty="solid",  
+xlab="het_amb", ylab="")
+
+mtext("Ausente", side=3, line=-1)
+
+
+#melhor simulação magurran
+
+which.min(par_sim_mag$qqtotal)
+par_sim_mag[which.min(par_sim_mag$qqtotal),]
+
+niche_sd_mag = rep(par_sim_mag[1,3], ncol(d.comm))
+
+sim.mag <- MCSim::fn.metaSIM(
+  landscape = simulation_landscape,
+  trait.Ef = niche_pos,
+  trait.Ef.sd = niche_sd_mag, 
+  gamma.abund = regional.rel.abund,
+  W.r = par_sim_mag[1,1],
+  nu = par_sim_mag[1,2],
+  n.timestep = 100, 
+  sim.ID = "sim_tn",
+  output.dir.path = "my_sim_output_directory" 
+)
+
+result<- sim.mag$J.long
+resultTime<- result[result$timestep==g,]
+d.comm_sim_mag<- xtabs(count~spp+site, data=resultTime)
+
+colnames(d.comm_sim_mag)<- simulation_landscape$site.info$site.ID
+
+#classificacao com bci como primeira parcela e acrescentando as mais proximas
+#obs nao sei como fazer a multinomial com media
+#primeiro pela matriz de dados de entrada
+#segundo pq nao sei como contabilizaria het amb e dist med
+
+#as distancias de bci ja estao no objeto dados_parcelas
+
+#classificacao e graficos simulados
+
+#primeira coisa para classificar: remover as linhas que sao zero
+zero<- which(rowSums(d.comm_sim_mag)==0)
+d_comm_mag<- d.comm_sim_mag[-zero,]
+
+#função para remover linhas com zero
+remove.zero.rows <- function(mx) {
+  row.is.non.zero <- !(rowSums(mx) == 0)
+  structure(mx[row.is.non.zero, , drop = FALSE], meta=attr(mx,"meta"))
+}
+
+tab_classificacao_mag<- d_comm_mag
+for(a in 2:ncol(d_comm_mag)){
+tab<- d_comm_mag[,1:a]
+tab<- remove.zero.rows(tab)
+abundantes<- apply(tab, 2, FUN= function(x){ 
+z<- x/sum(x)
+y<- cumsum(sort(z[z>0], decreasing=TRUE))
+ab<- which(y<0.75)
+names(ab)
+})
+
+nomes_abundantes<- unlist(abundantes)
+especies_abb<- unique(as.vector(as.matrix(nomes_abundantes)))
+
+tod<- rownames(d_comm_mag)
+part<- rownames(tab)
+presenca<- which(tod %in% part) 
+tab_classificacao_mag[-presenca,a]<- "A"
+tab_classificacao_mag[presenca,a]<- "E"
+abundantes<- which(tod %in% especies_abb)
+tab_classificacao_mag[abundantes,a]<- "AL"
+}
+
+x<- d_comm_mag[,1]
+x<- x[x>0]
+z<- x/sum(x)
+y<- cumsum(sort(z[z>0], decreasing=TRUE))
+ab<- which(y<0.75)
+abundantes<- names(ab)
+tod<- rownames(d_comm_mag)
+part<- names(x)
+presentes<- which(tod %in% part)
+tab_classificacao_mag[-presentes,1]<- "A"
+tab_classificacao_mag[presentes,1]<- "E"
+abundantes<- which(tod %in% abundantes)
+tab_classificacao_mag[abundantes,1]<- "AL"
+
+#dados mudanca de proporcao de cada categoria por escala
+
+p_categoria_mag <- data.frame(AL=rep(NA, ncol(d_comm_mag)), E=rep(NA, ncol(d_comm_mag)), A=rep(NA, ncol(d_comm_mag)))
+
+for (b in 1:ncol(d_comm_mag)){
+p_categoria_mag[b,]<-proportions(table(tab_classificacao_mag[,b]))[c("AL", "E", "A")] 
+}
+
+p_categoria_mag[is.na(p_categoria_mag)]<- 0
+
+p_categoria_mag<- cbind(p_categoria_mag, nindv=cumsum(simulation_landscape$site.info$JL))
+
+#variaveis preditoras
+het_amb<- rep(NA, ncol(d_comm_mag))
+for(i in 1:ncol(d_comm_mag)){
+het_amb[i]<- var(simulation_landscape$site.info$Ef[1:i])
+}
+het_amb[is.na(het_amb)]<- 0
+
+
+dist_med<- rep(NA, ncol(d_comm_mag))
+for(i in 1:ncol(d_comm_mag)){
+dist_med[i]<- median(dados_parcelas$dist_bci[1:i])
+}
+
+p_categoria_mag<- cbind(p_categoria_mag, het_amb=het_amb, dist_med=dist_med)
+p_categoria_mag[is.na(p_categoria_mag)]<- 0
+
+#graficos
+
+x<- p_categoria_mag[,"nindv"]
+
+X11(width = 10, height = 5)
+layout(matrix(c(1:3), nrow=1, ncol=3))
+layout.show(3)
+
+par(las=1, bty="l", mar=c(4, 4, 4, 1))
+
+plot(x,p_categoria_mag[,"AL"], type="l", lty="solid", 
+ylab="porcentagem da metacomunidade", 
+xlab="nindv")
+
+mtext("Abundante local", side=3, line=-1)
+
+plot(x,p_categoria_mag[,"E"], type="l", lty="solid", 
+xlab="nindv", ylab="",
+main="Magurranlandia %mtc por categoria por nindv")
+
+mtext("Esparsa", side=3, line=-1)
+
+plot(x,p_categoria_mag[,"A"], type="l", lty="solid",  
+xlab="nindv", ylab="")
+
+mtext("Ausente", side=3, line=-1)
+
+x<- p_categoria_mag[,"dist_med"]
+
+X11(width = 10, height = 5)
+layout(matrix(c(1:3), nrow=1, ncol=3))
+layout.show(3)
+
+par(las=1, bty="l", mar=c(4, 4, 4, 1))
+
+plot(x,p_categoria_mag[,"AL"], type="l", lty="solid", 
+ylab="porcentagem da metacomunidade", 
+xlab="dist_med")
+
+mtext("Abundante local", side=3, line=-1)
+
+plot(x,p_categoria_mag[,"E"], type="l", lty="solid", 
+xlab="dist_med", ylab="",
+main="Magurranlandia %mtc por categoria por dist_med")
+
+mtext("Esparsa", side=3, line=-1)
+
+plot(x,p_categoria_mag[,"A"], type="l", lty="solid",  
+xlab="dist_med", ylab="")
+
+mtext("Ausente", side=3, line=-1)
+
+x<- p_categoria_mag[,"het_amb"]
+
+X11(width = 10, height = 5)
+layout(matrix(c(1:3), nrow=1, ncol=3))
+layout.show(3)
+
+par(las=1, bty="l", mar=c(4, 4, 4, 1))
+
+plot(x,p_categoria_mag[,"AL"], type="l", lty="solid", 
+ylab="porcentagem da metacomunidade", 
+xlab="het_amb")
+
+mtext("Abundante local", side=3, line=-1)
+
+plot(x,p_categoria_mag[,"E"], type="l", lty="solid", 
+xlab="het_amb", ylab="",
+main="Magurranlandia %mtc por categoria por het_amb")
+
+mtext("Esparsa", side=3, line=-1)
+
+plot(x,p_categoria_mag[,"A"], type="l", lty="solid",  
+xlab="het_amb", ylab="")
+
+mtext("Ausente", side=3, line=-1)
+
+#correlacao entre variaveis preditoras
+plot(p_categoria[,"het_amb"],p_categoria[,"nindv"])
+plot(p_categoria[,"dist_med"],p_categoria[,"nindv"])
+plot(p_categoria[,"dist_med"],p_categoria[,"het_amb"])
+
+#regressao multinomial
+
+#preparando dados
+
+dados<- data.frame(spp=row.names(tab_classificacao), categoria=tab_classificacao[,1], amb=rep(het_amb[1], nrow(tab_classificacao)),disp=rep(dist_med[1], nrow(tab_classificacao)), N=rep(cumsum(simulation_landscape$site.info$JL)[1], nrow(tab_classificacao)))
+for (i in 2:57){
+y<- data.frame(spp=row.names(tab_classificacao), categoria=tab_classificacao[,i], amb=rep(het_amb[i], nrow(tab_classificacao)),disp=rep(dist_med[i], nrow(tab_classificacao)), N=rep(cumsum(simulation_landscape$site.info$JL)[i], nrow(tab_classificacao)))
+dados<- rbind(dados, y)
+}
+
+dados$categoria <- factor(dados$categoria)
+dados$categoria2 <- relevel(dados$categoria, ref = "A")
+
+library(nnet)
+
+modelo_teste<- multinom(categoria2 ~ N, data = dados)
+summary(modelo_teste)
+
+modelo_teste2<- multinom(categoria2 ~ N + disp, data = dados)
+summary(modelo_teste2)
+
+modelo_teste3<- multinom(categoria2 ~ N + amb, data = dados)
+summary(modelo_teste3)
+
+modelo_teste4<- multinom(categoria2 ~ N + disp + amb, data = dados)
+summary(modelo_teste4)
+
+library(bbmle)
+hub<- AICtab(modelo_teste,modelo_teste2,modelo_teste3,modelo_teste4)
+
+#brincadeiras
+z <- summary(modelo_teste4)$coefficients/summary(modelo_teste4)$standard.errors
+p <- (1 - pnorm(abs(z), 0, 1)) * 2
+p
+
+exp(coef(modelo_teste4))
+
+#o fitted fica bonitinho mas nao entendi direito pq
+head(pp <- fitted(modelo_teste4))
+head(unique(pp))
+
+#o predict gera predicoes independentes, vai gerando categorias individuais
+#ai nao tem como
+p<- predict(modelo_teste4, dados)
+tab<- table(p, dados$categoria)
+sum(diag(tab))/sum(tab)
+
+#preparando dados
+
+dados_mag<- data.frame(spp=row.names(tab_classificacao_mag), categoria=tab_classificacao_mag[,1], amb=rep(het_amb[1], nrow(tab_classificacao_mag)),disp=rep(dist_med[1], nrow(tab_classificacao_mag)), N=rep(cumsum(simulation_landscape$site.info$JL)[1], nrow(tab_classificacao_mag)))
+for (i in 2:57){
+y<- data.frame(spp=row.names(tab_classificacao_mag), categoria=tab_classificacao_mag[,i], amb=rep(het_amb[i], nrow(tab_classificacao_mag)),disp=rep(dist_med[i], nrow(tab_classificacao_mag)), N=rep(cumsum(simulation_landscape$site.info$JL)[i], nrow(tab_classificacao_mag)))
+dados_mag<- rbind(dados_mag, y)
+}
+
+dados_mag$categoria <- factor(dados_mag$categoria)
+dados_mag$categoria2 <- relevel(dados_mag$categoria, ref = "A")
+
+modelo_teste_mag<- multinom(categoria2 ~ N, data = dados_mag)
+
+modelo_teste2_mag<- multinom(categoria2 ~ N + disp, data = dados_mag)
+
+modelo_teste3_mag<- multinom(categoria2 ~ N + amb, data = dados_mag)
+
+modelo_teste4_mag<- multinom(categoria2 ~ N + disp + amb, data = dados_mag)
+
+#tentei colocar as especies como variavel preditora mas o modelo nao deu conta
+modelo_teste5_mag<- multinom(categoria2 ~ N + disp + amb + spp, data = dados_mag)
+
+modelo_teste6_mag<- multinom(categoria2 ~ N + spp + amb, data = dados_mag)
+
+#comparacao dos aic's'
+mag<- AICtab(modelo_teste_mag,modelo_teste2_mag,modelo_teste3_mag,modelo_teste4_mag)
+
+
+#tudo de novo sem bci
+
+
+panama_abb<- panama_abb[,-2] #retirando bci
+colnames(panama_abb)[c(53,54)]<- c("p31","p32") #mudando o nome dessas para conseguir estar em ordem alfabetica
+panama_abb<- panama_abb[,order(colnames(panama_abb))] #ordenando as parcelas por ordem alfabetica
+#algumas parcelas não estão na base de dados das parcelas do panama: soberania e gigante 1,2
+tira<- match(c("gigante1","gigante2","soberania"),colnames(panama_abb))
+panama_abb<- panama_abb[,-tira] 
+
+#dados das parcelas:
+
+#algumas parcelas não possuem informações, o jeito facil de tira-las eh so retirar as que nao tem informacao de tamanho
+dados_parcelas2<- plots_panama[plots_panama$PlotSize>0,]
+dados_parcelas2<- dados_parcelas2[order(dados_parcelas2$Name),]
+dados_parcelas2<- dados_parcelas2[-2,]
+str(dados_parcelas2)
+
+parametros_dispersao<- optimal.params.gst(panama_abb)
+m_local<- parametros_dispersao$m
+n_indv<- colSums(panama_abb)
+sad_regional<- rowSums(panama_abb)
+regional.rel.abund<- sad_regional/sum(sad_regional)
+nu<- optimal.prob(sad_regional)
+
+
+#criacao das parcelas pra simulacao
+
+xy.coordinates <- data.frame(
+  x = dados_parcelas2$UTM_X,
+  y = dados_parcelas2$UTM_Y)
+
+#gradiente ambiental
+EfElev<- dados_parcelas2$Elevation
+
+#m de dispersao
+parametros_dispersao<- optimal.params.gst(panama_abb)
+m_local<- parametros_dispersao$m
+
+simulation_landscape2 <- MCSim::fn.make.landscape(
+  site.coords = xy.coordinates,
+  Ef = EfElev,
+  m = m_local,
+  JL = colSums(panama_abb), 
+  area.m2=dados_parcelas2$PlotSize,
+  site.ID = dados_parcelas2$Name)
+
+print(simulation_landscape2$site.info)
+
+#parametros fixos para a simulacao
+
+d.comm2<- t(panama_abb)
+d.comm.ra2 <- d.comm / rowSums(d.comm)
+
+sad_regional2<- rowSums(panama_abb)
+regional.rel.abund2<- sad_regional2/sum(sad_regional2)
+
+niche_pos = niche_pos = runif(ncol(d.comm2), min=min(EfElev),max=max(EfElev))
+niche_sd_tn = rep(diff(range(EfElev))*1000, ncol(d.comm2))
+
+#parametros para variar
+disp_lim<- c(10, 10^2, 10^3, 10^4, 10^5, 10^6)
+nu<- c(10^-1, 10^-2, 10^-3, 10^-4, 10^-5, 10^-6)
+
+par_sim2<- expand.grid(disp_lim,nu)
+ 
+#simulação
+
+for (i in 1:nrow(par_sim)){
+
+sim.neutra <- MCSim::fn.metaSIM(
+  landscape = simulation_landscape2,
+  trait.Ef = niche_pos,
+  trait.Ef.sd = niche_sd_tn, 
+  gamma.abund = regional.rel.abund2,
+  W.r = par_sim2[i,1],
+  nu = par_sim2[i,2],
+  n.timestep = 100, 
+  sim.ID = "sim_tn",
+  output.dir.path = "my_sim_output_directory" 
+)
+
+alpha_sim<- rep(NA, 100)
+beta_sim<- rep(NA, 100)
+gamma_sim<- rep(NA, 100)
+
+for (g in 1:100){
+result<- sim.neutra$J.long
+resultTime<- result[result$timestep==g,]
+d.comm_sim<- xtabs(count~site+spp, data=resultTime)
+
+alpha_sim[g]<- vegetarian::d(abundances = d.comm_sim, lev = "alpha", q = 1)
+beta_sim[g]<- vegetarian::d(abundances = d.comm_sim, lev = "beta", q = 1)
+gamma_sim[g]<- vegetarian::d(abundances = d.comm_sim, lev = "gamma", q = 1)
+}
+
+par_sim2$qqalpha[i]<- ((alpha_sim[100]-(vegetarian::d(abundances = d.comm2, lev = "alpha", q = 1)))^2)/sd(alpha_sim)
+par_sim2$qqbeta[i]<- ((beta_sim[100]-(vegetarian::d(abundances = d.comm2, lev = "beta", q = 1)))^2)/sd(beta_sim)
+par_sim2$qqgamma[i]<- ((gamma_sim[100]-(vegetarian::d(abundances = d.comm2, lev = "gamma", q = 1)))^2)/sd(gamma_sim)
+par_sim2$qqtotal[i]<- sum(par_sim$qqalpha[i], par_sim$qqbeta[i], par_sim$qqgamma[i])
+}
+
+
+which.min(par_sim2$qqtotal)
+
+sim.neutra2 <- MCSim::fn.metaSIM(
+  landscape = simulation_landscape2,
+  trait.Ef = niche_pos,
+  trait.Ef.sd = niche_sd_tn, 
+  gamma.abund = regional.rel.abund2,
+  W.r = par_sim2[10,1],
+  nu = par_sim2[10,2],
+  n.timestep = 100, 
+  sim.ID = "sim_tn2",
+  output.dir.path = "my_sim_output_directory" 
+)
+
+result<- sim.neutra2$J.long
+resultTime<- result[result$timestep==100,]
+d.comm_sim_hub2<- xtabs(count~spp+site, data=resultTime)
+
+colnames(d.comm_sim_hub2)<- simulation_landscape2$site.info$site.ID
+
+#as parcelas estao em ordem alfabetica
+#precisa colocar em ordem de distancia antes de classificar
+
+#fazendo matriz de distancias para poder classificar a partir do mais proximo
+library(raster)
+pts<- data.frame(dados_parcelas2$UTM_X, dados_parcelas2$UTM_Y, row.names=dados_parcelas2$Name)
+dist2<- pointDistance(pts, lonlat=FALSE)
+rownames(dist2)<- rownames(pts)
+colnames(dist2)<- rownames(pts)
+str(dist2)
+
+distancia<- sort(dist2[dados_parcelas2$Name[1],])
+distancia<- data.frame(distancia)
+parcelas<- merge(dados_parcelas2, distancia, by.y="row.names", by.x="Name")
+parcelas<- parcelas[order(parcelas$distancia),]
+
+d.comm_sim_hub2<- subset.data.frame(d.comm_sim_hub2, select=parcelas$Name)
+
+#primeira coisa para classificar: remover as linhas que sao zero
+zero<- which(rowSums(d.comm_sim_hub2)==0)
+d_comm_hub2<- d.comm_sim_hub2[-zero,]
+
+
+tab_classificacao2<- d_comm_hub2
+for(a in 2:ncol(d_comm_hub2)){
+tab<- d_comm_hub2[,1:a]
+tab<- remove.zero.rows(tab)
+abundantes<- apply(tab, 2, FUN= function(x){ 
+z<- x/sum(x)
+y<- cumsum(sort(z[z>0], decreasing=TRUE))
+ab<- which(y<0.75)
+names(ab)
+})
+
+nomes_abundantes<- unlist(abundantes)
+especies_abb<- unique(as.vector(as.matrix(nomes_abundantes)))
+
+tod<- rownames(d_comm_hub2)
+part<- rownames(tab)
+presenca<- which(tod %in% part) 
+tab_classificacao2[-presenca,a]<- "A"
+tab_classificacao2[presenca,a]<- "E"
+abundantes<- which(tod %in% especies_abb)
+tab_classificacao2[abundantes,a]<- "AL"
+}
+
+x<- d_comm_hub2[,1]
+x<- x[x>0]
+z<- x/sum(x)
+y<- cumsum(sort(z[z>0], decreasing=TRUE))
+ab<- which(y<0.75)
+abundantes<- names(ab)
+tod<- rownames(d_comm_hub)
+part<- names(x)
+presentes<- which(tod %in% part)
+tab_classificacao2[-presentes,1]<- "A"
+tab_classificacao2[presentes,1]<- "E"
+abundantes<- which(tod %in% abundantes)
+tab_classificacao2[abundantes,1]<- "AL"
+
+#dados mudanca de proporcao de cada categoria por escala
+
+p_categoria2 <- data.frame(AL=rep(NA, ncol(d_comm_hub2)), E=rep(NA, ncol(d_comm_hub2)), A=rep(NA, ncol(d_comm_hub2)))
+
+for (b in 1:ncol(d_comm_hub2)){
+p_categoria2[b,]<-proportions(table(tab_classificacao2[,b]))[c("AL", "E", "A")] 
+}
+
+p_categoria2[is.na(p_categoria2)]<- 0
+
+p_categoria2<- cbind(p_categoria2, nindv=cumsum(simulation_landscape2$site.info$JL))
+
+#variaveis preditoras
+het_amb2<- rep(NA, ncol(d_comm_hub2))
+for(i in 1:ncol(d_comm_hub2)){
+het_amb2[i]<- var(simulation_landscape2$site.info$Ef[1:i])
+}
+het_amb2[is.na(het_amb2)]<- 0
+
+dist_med2<- rep(NA, ncol(d_comm_hub2))
+for(i in 1:ncol(d_comm_hub2)){
+dist_med2[i]<- median(parcelas$distancia[1:i])
+}
+
+p_categoria2<- cbind(p_categoria2, het_amb2=het_amb2, dist_med2=dist_med2)
+p_categoria2[is.na(p_categoria2)]<- 0
+
+#graficos
+
+x<- p_categoria2[,"nindv"]
+
+X11(width = 10, height = 5)
+layout(matrix(c(1:3), nrow=1, ncol=3))
+layout.show(3)
+
+par(las=1, bty="l", mar=c(4, 4, 4, 1))
+
+plot(x,p_categoria2[,"AL"], type="l", lty="solid", 
+ylab="porcentagem da metacomunidade", 
+xlab="nindv")
+
+mtext("Abundante local", side=3, line=-1)
+
+plot(x,p_categoria2[,"E"], type="l", lty="solid", 
+xlab="nindv", ylab="",
+main="Hubbellandia s/bci %mtc por categoria por nindv")
+
+mtext("Esparsa", side=3, line=-1)
+
+plot(x,p_categoria2[,"A"], type="l", lty="solid",  
+xlab="nindv", ylab="")
+
+mtext("Ausente", side=3, line=-1)
+
+#regressao multinomial
+
+dados2<- data.frame(spp=row.names(tab_classificacao2), categoria=tab_classificacao2[,1], amb=rep(het_amb2[1], nrow(tab_classificacao2)),disp=rep(dist_med2[1], nrow(tab_classificacao2)), N=rep(cumsum(simulation_landscape2$site.info$JL)[1], nrow(tab_classificacao2)))
+for (i in 2:56){
+y<- data.frame(spp=row.names(tab_classificacao2), categoria=tab_classificacao2[,i], amb=rep(het_amb2[i], nrow(tab_classificacao2)),disp=rep(dist_med2[i], nrow(tab_classificacao2)), N=rep(cumsum(simulation_landscape2$site.info$JL)[i], nrow(tab_classificacao2)))
+dados2<- rbind(dados2, y)
+}
+
+dados2$categoria <- factor(dados2$categoria)
+dados2$categoria2 <- relevel(dados2$categoria, ref = "A")
+
+library(nnet)
+
+modelo_teste<- multinom(categoria2 ~ N, data = dados2)
+
+modelo_teste2<- multinom(categoria2 ~ N + disp, data = dados2)
+
+modelo_teste3<- multinom(categoria2 ~ N + amb, data = dados2)
+
+modelo_teste4<- multinom(categoria2 ~ N + disp + amb, data = dados2)
+
+library(bbmle)
+hub2<- AICtab(modelo_teste,modelo_teste2,modelo_teste3,modelo_teste4)
+
+
+save.image(file="sim_quiquadrado.RData")
+
